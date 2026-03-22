@@ -411,7 +411,7 @@ Use \`imagegen_openai\` with \`quality: "medium"\` — it stays under the 45s ti
 let readmeAcknowledged = false;
 
 server.tool(
-  "get_operating_readme",
+  "imagegen_get_readme",
   "Return the operating instructions for the Image Gen MCP server. MUST be called and acknowledged before using any other tools in this server.",
   {},
   async () => {
@@ -422,7 +422,7 @@ server.tool(
 );
 
 server.tool(
-  "acknowledge_operating_readme",
+  "imagegen_acknowledge_readme",
   "Acknowledge that you have read and understood the operating readme. Must pass the current version string from the readme.",
   {
     version: z.string().describe("The version string from the operating readme (e.g., '2026-03-22-v1')."),
