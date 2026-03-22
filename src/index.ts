@@ -627,8 +627,6 @@ server.tool(
         wpResult = await uploadToWordPress(imageBuffer, finalFilename, wpUrl, wpUser, wpPass, fmtConfig.mimeType);
       }
 
-      const base64Final = imageBuffer.toString("base64");
-
       const textParts: string[] = [
         `Image generated successfully via OpenAI ${model}.`,
       ];
@@ -644,15 +642,20 @@ server.tool(
 
       const finalTextOpenai = sanitizeToolText(textParts.join("\n"));
 
-      // Only include base64 image data if NOT uploaded to WP (avoids response size issues)
-      const contentBlocks: any[] = [
-        { type: "text", text: finalTextOpenai },
-      ];
-      if (!wpResult) {
-        contentBlocks.push({ type: "image", data: base64Final, mimeType: "image/png" });
+      // Only include base64 image data if NOT uploaded to WP
+      if (wpResult) {
+        return {
+          content: [{ type: "text", text: finalTextOpenai }],
+        };
       }
 
-      return { content: contentBlocks };
+      const base64Final = imageBuffer.toString("base64");
+      return {
+        content: [
+          { type: "text", text: finalTextOpenai },
+          { type: "image", data: base64Final, mimeType: "image/png" },
+        ],
+      };
     } catch (error) {
       return {
         isError: true,
@@ -721,8 +724,6 @@ server.tool(
         wpResult = await uploadToWordPress(imageBuffer, filename, wpUrl, wpUser, wpPass, fmtConfig.mimeType);
       }
 
-      const base64Final = imageBuffer.toString("base64");
-
       const textParts: string[] = [
         `Image generated successfully via Google Gemini.`,
       ];
@@ -736,14 +737,19 @@ server.tool(
       const finalTextGemini = sanitizeToolText(textParts.join("\n"));
 
       // Only include base64 image data if NOT uploaded to WP (avoids response size issues)
-      const contentBlocks: any[] = [
-        { type: "text", text: finalTextGemini },
-      ];
-      if (!wpResult) {
-        contentBlocks.push({ type: "image", data: base64Final, mimeType: "image/png" });
+      if (wpResult) {
+        return {
+          content: [{ type: "text", text: finalTextGemini }],
+        };
       }
 
-      return { content: contentBlocks };
+      const base64Final = imageBuffer.toString("base64");
+      return {
+        content: [
+          { type: "text", text: finalTextGemini },
+          { type: "image", data: base64Final, mimeType: "image/png" },
+        ],
+      };
     } catch (error) {
       return {
         isError: true,
