@@ -643,14 +643,16 @@ server.tool(
       }
 
       const finalTextOpenai = sanitizeToolText(textParts.join("\n"));
-      console.error(`[DEBUG] imagegen_openai final tool result text: "${finalTextOpenai}"`);
 
-      return {
-        content: [
-          { type: "text", text: finalTextOpenai },
-          { type: "image", data: base64Final, mimeType: "image/png" },
-        ],
-      };
+      // Only include base64 image data if NOT uploaded to WP (avoids response size issues)
+      const contentBlocks: any[] = [
+        { type: "text", text: finalTextOpenai },
+      ];
+      if (!wpResult) {
+        contentBlocks.push({ type: "image", data: base64Final, mimeType: "image/png" });
+      }
+
+      return { content: contentBlocks };
     } catch (error) {
       return {
         isError: true,
@@ -732,14 +734,16 @@ server.tool(
       }
 
       const finalTextGemini = sanitizeToolText(textParts.join("\n"));
-      console.error(`[DEBUG] imagegen_gemini final tool result text: "${finalTextGemini}"`);
 
-      return {
-        content: [
-          { type: "text", text: finalTextGemini },
-          { type: "image", data: base64Final, mimeType: "image/png" },
-        ],
-      };
+      // Only include base64 image data if NOT uploaded to WP (avoids response size issues)
+      const contentBlocks: any[] = [
+        { type: "text", text: finalTextGemini },
+      ];
+      if (!wpResult) {
+        contentBlocks.push({ type: "image", data: base64Final, mimeType: "image/png" });
+      }
+
+      return { content: contentBlocks };
     } catch (error) {
       return {
         isError: true,
