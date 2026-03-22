@@ -344,12 +344,19 @@ async function uploadToWordPress(
     body: imageBuffer as any,
   });
 
+  // Log the raw response body before any parsing
+  const rawBody = await res.text();
+  console.error(`[WP Upload] Status: ${res.status}`);
+  console.error(`[WP Upload] Content-Type sent: ${contentType}`);
+  console.error(`[WP Upload] Filename: ${filename}`);
+  console.error(`[WP Upload] Raw response body (first 2000 chars):\n${rawBody.slice(0, 2000)}`);
+
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`WordPress upload error (${res.status}): ${err}`);
+    throw new Error(`WordPress upload error (${res.status}): ${rawBody}`);
   }
 
-  const media = await res.json() as { id: number; source_url: string };
+  // Parse JSON from the raw body (since we already consumed the stream with .text())
+  const media = JSON.parse(rawBody) as { id: number; source_url: string };
   return { id: media.id, url: media.source_url };
 }
 
