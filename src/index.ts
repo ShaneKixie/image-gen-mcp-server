@@ -63,6 +63,7 @@ interface GenerateOptions {
   logo?: string;
   logo_position?: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
   logo_scale?: number;
+  output_format?: OutputFormat;
   upload_to_wp?: boolean;
   wp_filename?: string;
 }
@@ -107,6 +108,12 @@ async function runGeneration(opts: GenerateOptions): Promise<{
     );
   }
 
+  // Convert to output format (default: avif)
+  const fmt = opts.output_format || "avif";
+  const fmtConfig = FORMAT_CONFIG[fmt];
+  imageBuffer = await convertImageFormat(imageBuffer, fmt);
+  mimeType = fmtConfig.mimeType;
+
   // Upload to WordPress if requested
   let wpResult: { id: number; url: string } | undefined;
   if (opts.upload_to_wp) {
@@ -116,8 +123,12 @@ async function runGeneration(opts: GenerateOptions): Promise<{
     if (!wpUrl || !wpUser || !wpPass) {
       throw new Error("WordPress upload requires WP_URL, WP_USER, and WP_APP_PASSWORD environment variables.");
     }
-    const filename = opts.wp_filename || `ai-generated-${Date.now()}.png`;
-    wpResult = await uploadToWordPress(imageBuffer, filename, wpUrl, wpUser, wpPass);
+    let filename = opts.wp_filename || `ai-generated-${Date.now()}${fmtConfig.ext}`;
+    // Ensure filename has the correct extension
+    if (!filename.endsWith(fmtConfig.ext)) {
+      filename = filename.replace(/\.[^.]+$/, fmtConfig.ext);
+    }
+    wpResult = await uploadToWordPress(imageBuffer, filename, wpUrl, wpUser, wpPass, fmtConfig.mimeType);
   }
 
   return {
@@ -128,6 +139,25 @@ async function runGeneration(opts: GenerateOptions): Promise<{
 }
 
 
+
+// ─── Format Configuration ────────────────────────────────────────────────────
+
+type OutputFormat = "png" | "avif" | "webp";
+
+const FORMAT_CONFIG: Record<OutputFormat, { mimeType: string; ext: string }> = {
+  png: { mimeType: "image/png", ext: ".png" },
+  avif: { mimeType: "image/avif", ext: ".avif" },
+  webp: { mimeType: "image/webp", ext: ".webp" },
+};
+
+async function convertImageFormat(
+  buffer: Buffer,
+  format: OutputFormat,
+): Promise<Buffer> {
+  if (format === "avif") return sharp(buffer).avif({ quality: 80 }).toBuffer();
+  if (format === "webp") return sharp(buffer).webp({ quality: 85 }).toBuffer();
+  return sharp(buffer).png().toBuffer();
+}
 
 async function fetchImageAsBuffer(url: string): Promise<Buffer> {
   const res = await fetch(url);
@@ -299,7 +329,8 @@ async function uploadToWordPress(
   filename: string,
   wpUrl: string,
   wpUser: string,
-  wpAppPassword: string
+  wpAppPassword: string,
+  contentType: string = "image/png"
 ): Promise<{ id: number; url: string }> {
   const auth = Buffer.from(`${wpUser}:${wpAppPassword}`).toString("base64");
 
@@ -308,7 +339,7 @@ async function uploadToWordPress(
     headers: {
       Authorization: `Basic ${auth}`,
       "Content-Disposition": `attachment; filename="${filename}"`,
-      "Content-Type": "image/png",
+      "Content-Type": contentType,
     },
     body: imageBuffer as any,
   });
@@ -331,7 +362,7 @@ const server = new McpServer({
 
 // ─── Operating README ────────────────────────────────────────────────────────
 
-const OPERATING_README_VERSION = "2026-03-22-v1";
+const OPERATING_README_VERSION = "2026-03-22-v2";
 
 const OPERATING_README = `
 # Image Gen MCP Server — Operating README
@@ -406,6 +437,16 @@ Use \`imagegen_openai\` with \`quality: "medium"\` — it stays under the 45s ti
 - Logo images should ideally have transparent backgrounds for clean compositing.
 - The base64 image returned by the tools may not render inline in Claude.ai chat. Always use \`upload_to_wp: true\` or tell the user to check the WordPress media library for the final result.
 - When generating blog headers, default to 16:9 aspect ratio (Gemini) or 1536x1024 (OpenAI).
+
+---
+
+## Output Format (AVIF by default)
+All generation tools support an \`output_format\` parameter: "avif" (default), "webp", or "png".
+- **AVIF**: 50-80% smaller than PNG, excellent quality. Default for all generation. Best for page speed.
+- **WebP**: Widely supported, ~30-50% smaller than PNG. Good fallback if AVIF causes issues.
+- **PNG**: Lossless, largest file size. Use only when lossless quality is required.
+
+The format conversion happens via Sharp after logo compositing. WordPress filenames and Content-Type headers are automatically updated to match the output format.
 `.trim();
 
 let readmeAcknowledged = false;
@@ -460,9 +501,10 @@ server.tool(
     logo_position: z.enum(["top-left", "top-right", "bottom-left", "bottom-right", "center"]).default("top-left").describe("Where to place the logo on the image."),
     logo_scale: z.number().min(0.05).max(0.5).default(0.15).describe("Logo size as fraction of image width (0.15 = 15% of image width)."),
     upload_to_wp: z.boolean().default(false).describe("Upload the final image to WordPress and return the media URL."),
-    wp_filename: z.string().optional().describe("Filename for WordPress upload (e.g. 'mobile-dom-alerts-header.png')."),
+    wp_filename: z.string().optional().describe("Filename for WordPress upload (e.g. 'mobile-dom-alerts-header.avif')."),
+    output_format: z.enum(["png", "avif", "webp"]).default("avif").describe("Output image format. AVIF is smallest (50-80% smaller than PNG), WebP is widely supported, PNG is lossless. Default: avif."),
   },
-  async ({ prompt, model, size, quality, logo, logo_position, logo_scale, upload_to_wp, wp_filename }) => {
+  async ({ prompt, model, size, quality, logo, logo_position, logo_scale, upload_to_wp, wp_filename, output_format }) => {
     try {
       // Generate the image
       const result = await generateImageOpenAI(prompt, model, size, quality);
@@ -484,6 +526,11 @@ server.tool(
         imageBuffer = await compositeLogoOnImage(imageBuffer, logoBuffer, logo_position, 30, logo_scale);
       }
 
+      // Convert to output format
+      const fmt = output_format || "avif";
+      const fmtConfig = FORMAT_CONFIG[fmt];
+      imageBuffer = await convertImageFormat(imageBuffer, fmt);
+
       // Upload to WordPress if requested
       let wpResult: { id: number; url: string } | null = null;
       if (upload_to_wp) {
@@ -497,13 +544,14 @@ server.tool(
           };
         }
         const filename = wp_filename || `ai-generated-${Date.now()}.png`;
-        wpResult = await uploadToWordPress(imageBuffer, filename, wpUrl, wpUser, wpPass);
+        let finalFilename = filename.endsWith(fmtConfig.ext) ? filename : filename.replace(/\.[^.]+$/, fmtConfig.ext);
+        wpResult = await uploadToWordPress(imageBuffer, finalFilename, wpUrl, wpUser, wpPass, fmtConfig.mimeType);
       }
 
       const base64Final = imageBuffer.toString("base64");
 
       const textParts: string[] = [
-        `Image generated successfully via OpenAI ${model}.`,
+        `Image generated successfully via OpenAI ${model} (format: ${fmt}).`,
       ];
       if (result.revisedPrompt) {
         textParts.push(`Revised prompt: ${result.revisedPrompt}`);
@@ -518,7 +566,7 @@ server.tool(
       return {
         content: [
           { type: "text", text: textParts.join("\n") },
-          { type: "image", data: base64Final, mimeType: "image/png" },
+          { type: "image", data: base64Final, mimeType: fmtConfig.mimeType },
         ],
       };
     } catch (error) {
@@ -542,8 +590,9 @@ server.tool(
     logo_scale: z.number().min(0.05).max(0.5).default(0.15).describe("Logo size as fraction of image width."),
     upload_to_wp: z.boolean().default(false).describe("Upload the final image to WordPress and return the media URL."),
     wp_filename: z.string().optional().describe("Filename for WordPress upload."),
+    output_format: z.enum(["png", "avif", "webp"]).default("avif").describe("Output image format. AVIF is smallest, WebP is widely supported, PNG is lossless. Default: avif."),
   },
-  async ({ prompt, aspect_ratio, logo, logo_position, logo_scale, upload_to_wp, wp_filename }) => {
+  async ({ prompt, aspect_ratio, logo, logo_position, logo_scale, upload_to_wp, wp_filename, output_format }) => {
     try {
       const result = await generateImageGemini(prompt, aspect_ratio);
       let imageBuffer: any = Buffer.from(result.base64, "base64");
@@ -564,6 +613,11 @@ server.tool(
         imageBuffer = await compositeLogoOnImage(imageBuffer, logoBuffer, logo_position, 30, logo_scale);
       }
 
+      // Convert to output format
+      const fmt = output_format || "avif";
+      const fmtConfig = FORMAT_CONFIG[fmt];
+      imageBuffer = await convertImageFormat(imageBuffer, fmt);
+
       // Upload to WordPress if requested
       let wpResult: { id: number; url: string } | null = null;
       if (upload_to_wp) {
@@ -576,14 +630,17 @@ server.tool(
             content: [{ type: "text", text: "WordPress upload requires WP_URL, WP_USER, and WP_APP_PASSWORD environment variables." }],
           };
         }
-        const filename = wp_filename || `ai-generated-${Date.now()}.png`;
-        wpResult = await uploadToWordPress(imageBuffer, filename, wpUrl, wpUser, wpPass);
+        let filename = wp_filename || `ai-generated-${Date.now()}${fmtConfig.ext}`;
+        if (!filename.endsWith(fmtConfig.ext)) {
+          filename = filename.replace(/\.[^.]+$/, fmtConfig.ext);
+        }
+        wpResult = await uploadToWordPress(imageBuffer, filename, wpUrl, wpUser, wpPass, fmtConfig.mimeType);
       }
 
       const base64Final = imageBuffer.toString("base64");
 
       const textParts: string[] = [
-        "Image generated successfully via Google Gemini.",
+        `Image generated successfully via Google Gemini (format: ${fmt}).`,
       ];
       if (logo) {
         textParts.push(`Logo composited at ${logo_position} (scale: ${logo_scale}).`);
@@ -595,7 +652,7 @@ server.tool(
       return {
         content: [
           { type: "text", text: textParts.join("\n") },
-          { type: "image", data: base64Final, mimeType: result.mimeType || "image/png" },
+          { type: "image", data: base64Final, mimeType: fmtConfig.mimeType },
         ],
       };
     } catch (error) {
@@ -722,8 +779,9 @@ server.tool(
     logo_scale: z.number().min(0.05).max(0.5).default(0.15).optional(),
     upload_to_wp: z.boolean().default(false).optional().describe("Upload to WordPress when complete."),
     wp_filename: z.string().optional().describe("Filename for WordPress upload."),
+    output_format: z.enum(["png", "avif", "webp"]).default("avif").optional().describe("Output image format. Default: avif."),
   },
-  async ({ provider, prompt, model, size, quality, aspect_ratio, logo, logo_position, logo_scale, upload_to_wp, wp_filename }) => {
+  async ({ provider, prompt, model, size, quality, aspect_ratio, logo, logo_position, logo_scale, upload_to_wp, wp_filename, output_format }) => {
     const jobId = generateJobId();
     const job: Job = {
       id: jobId,
@@ -745,6 +803,7 @@ server.tool(
       logo: logo || undefined,
       logo_position: (logo_position as any) || undefined,
       logo_scale: logo_scale || undefined,
+      output_format: (output_format as OutputFormat) || undefined,
       upload_to_wp: upload_to_wp || false,
       wp_filename: wp_filename || undefined,
     }).then((result) => {
