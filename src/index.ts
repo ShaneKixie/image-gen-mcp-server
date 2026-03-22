@@ -419,6 +419,16 @@ async function uploadToWordPress(
     }
   }
 
+  console.error(`[WP Upload] Parsed id: ${media.id}, source_url: "${media.source_url}"`);
+  console.error(`[WP Upload] source_url length: ${String(media.source_url).length}`);
+
+  // Check for post-JSON trailing content that JSON.parse silently ignores
+  // JSON.parse is strict and won't include trailing text, but let's verify
+  const reStringified = JSON.stringify(media);
+  if (reStringified.includes("supported") || reStringified.includes("not currently")) {
+    console.error(`[WP Upload] WARNING IN PARSED JSON: found warning text in re-stringified response`);
+  }
+
   return { id: media.id as number, url: media.source_url as string };
 }
 
@@ -723,6 +733,10 @@ server.tool(
 
       const finalTextGemini = sanitizeToolText(textParts.join("\n"));
       console.error(`[DEBUG] imagegen_gemini final tool result text: "${finalTextGemini}"`);
+      console.error(`[DEBUG] imagegen_gemini base64 first 50 chars: "${base64Final.slice(0, 50)}"`);
+      console.error(`[DEBUG] imagegen_gemini base64 last 50 chars: "${base64Final.slice(-50)}"`);
+      console.error(`[DEBUG] imagegen_gemini mimeType: "${fmtConfig.mimeType}"`);
+      console.error(`[DEBUG] imagegen_gemini content array length: 2`);
 
       return {
         content: [
