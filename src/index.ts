@@ -630,7 +630,7 @@ server.tool(
       const base64Final = imageBuffer.toString("base64");
 
       const textParts: string[] = [
-        `Image generated successfully via OpenAI ${model} (format: ${fmt}).`,
+        `Image generated successfully via OpenAI ${model}.`,
       ];
       if (result.revisedPrompt) {
         textParts.push(`Revised prompt: ${result.revisedPrompt}`);
@@ -648,7 +648,7 @@ server.tool(
       return {
         content: [
           { type: "text", text: finalTextOpenai },
-          { type: "image", data: base64Final, mimeType: fmtConfig.mimeType },
+          { type: "image", data: base64Final, mimeType: "image/png" },
         ],
       };
     } catch (error) {
@@ -722,7 +722,7 @@ server.tool(
       const base64Final = imageBuffer.toString("base64");
 
       const textParts: string[] = [
-        `Image generated successfully via Google Gemini (format: ${fmt}).`,
+        `Image generated successfully via Google Gemini.`,
       ];
       if (logo) {
         textParts.push(`Logo composited at ${logo_position} (scale: ${logo_scale}).`);
@@ -733,15 +733,11 @@ server.tool(
 
       const finalTextGemini = sanitizeToolText(textParts.join("\n"));
       console.error(`[DEBUG] imagegen_gemini final tool result text: "${finalTextGemini}"`);
-      console.error(`[DEBUG] imagegen_gemini base64 first 50 chars: "${base64Final.slice(0, 50)}"`);
-      console.error(`[DEBUG] imagegen_gemini base64 last 50 chars: "${base64Final.slice(-50)}"`);
-      console.error(`[DEBUG] imagegen_gemini mimeType: "${fmtConfig.mimeType}"`);
-      console.error(`[DEBUG] imagegen_gemini content array length: 2`);
 
       return {
         content: [
           { type: "text", text: finalTextGemini },
-          { type: "image", data: base64Final, mimeType: fmtConfig.mimeType },
+          { type: "image", data: base64Final, mimeType: "image/png" },
         ],
       };
     } catch (error) {
@@ -964,7 +960,7 @@ server.tool(
       content.push({
         type: "image",
         data: job.base64,
-        mimeType: job.mimeType || "image/png",
+        mimeType: "image/png",
       });
     }
 
