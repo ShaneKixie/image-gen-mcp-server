@@ -375,6 +375,27 @@ async function uploadToWordPress(
 
   const media = JSON.parse(jsonBody) as Record<string, unknown>;
 
+  // Check for content AFTER the JSON (WordPress might append PHP notices after the closing brace)
+  const lastBrace = rawBody.lastIndexOf("}");
+  if (lastBrace < rawBody.length - 1) {
+    const postJsonContent = rawBody.slice(lastBrace + 1).trim();
+    if (postJsonContent) {
+      console.error(`[WP Upload] POST-JSON CONTENT FOUND (${postJsonContent.length} chars): ${postJsonContent.slice(0, 500)}`);
+    }
+  }
+
+  // Log the description.rendered field specifically — it contains HTML that might have the warning
+  const desc = media.description as Record<string, unknown> | undefined;
+  if (desc?.rendered) {
+    console.error(`[WP Upload] description.rendered: ${String(desc.rendered).slice(0, 500)}`);
+  }
+
+  // Log caption fields
+  const caption = media.caption as Record<string, unknown> | undefined;
+  if (caption?.rendered) {
+    console.error(`[WP Upload] caption.rendered: ${String(caption.rendered).slice(0, 500)}`);
+  }
+
   // Deep scan every field for "supported" or "format" warnings
   const scanForWarnings = (obj: unknown, path: string = ""): void => {
     if (typeof obj === "string") {
