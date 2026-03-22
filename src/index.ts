@@ -355,6 +355,7 @@ async function uploadToWordPress(
 
   const rawBody = await res.text();
   console.error(`[WP Upload] Status: ${res.status} | Content-Type: ${contentType} | File: ${filename}`);
+  console.error(`[WP Upload] Raw body LAST 500 chars:\n${rawBody.slice(-500)}`);
 
   if (!res.ok) {
     throw new Error(`WordPress upload error (${res.status}): ${rawBody.slice(0, 500)}`);
@@ -372,8 +373,32 @@ async function uploadToWordPress(
     console.error(`[WP Upload] Stripped ${jsonStart} chars of pre-JSON content: ${rawBody.slice(0, jsonStart).trim()}`);
   }
 
-  const media = JSON.parse(jsonBody) as { id: number; source_url: string };
-  return { id: media.id, url: media.source_url };
+  const media = JSON.parse(jsonBody) as Record<string, unknown>;
+
+  // Deep scan every field for "supported" or "format" warnings
+  const scanForWarnings = (obj: unknown, path: string = ""): void => {
+    if (typeof obj === "string") {
+      if (obj.includes("supported") || obj.includes("not currently") || obj.includes("Supported formats")) {
+        console.error(`[WP Upload] WARNING FOUND in field "${path}": ${obj.slice(0, 300)}`);
+      }
+    } else if (Array.isArray(obj)) {
+      obj.forEach((item, i) => scanForWarnings(item, `${path}[${i}]`));
+    } else if (obj && typeof obj === "object") {
+      for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+        scanForWarnings(value, path ? `${path}.${key}` : key);
+      }
+    }
+  };
+  scanForWarnings(media);
+
+  // Log all string fields that contain "image" for good measure
+  for (const [key, value] of Object.entries(media)) {
+    if (typeof value === "string" && value.includes("image") && key !== "source_url" && key !== "guid" && key !== "link") {
+      console.error(`[WP Upload] Field "${key}": ${(value as string).slice(0, 200)}`);
+    }
+  }
+
+  return { id: media.id as number, url: media.source_url as string };
 }
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
