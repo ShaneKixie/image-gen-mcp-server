@@ -20,6 +20,42 @@ for (const [key, value] of Object.entries(process.env)) {
   }
 }
 
+// Pre-configured WordPress sites (add via env vars)
+// Pattern: WP_<SITE>_URL, WP_<SITE>_USER, WP_<SITE>_PASSWORD
+// e.g. WP_BESTPROPS_URL=https://bestprops.com, WP_BESTPROPS_USER=smartin, WP_BESTPROPS_PASSWORD=xxx
+interface WpSiteConfig {
+  url: string;
+  user: string;
+  password: string;
+}
+
+const WP_SITES: Record<string, WpSiteConfig> = {};
+
+// Auto-discover WP sites from env vars
+const wpUrlPattern = /^WP_([A-Z0-9_]+)_URL$/;
+for (const [key, value] of Object.entries(process.env)) {
+  const match = key.match(wpUrlPattern);
+  if (match && value) {
+    const siteName = match[1].toLowerCase();
+    const user = process.env[`WP_${match[1]}_USER`] || "";
+    const password = process.env[`WP_${match[1]}_PASSWORD`] || "";
+    if (user && password) {
+      WP_SITES[siteName] = { url: value, user, password };
+    }
+  }
+}
+
+// Fallback: if old-style WP_URL/WP_USER/WP_APP_PASSWORD are set and "bestprops" isn't configured
+if (!WP_SITES["bestprops"] && process.env.WP_URL && process.env.WP_USER && process.env.WP_APP_PASSWORD) {
+  WP_SITES["bestprops"] = {
+    url: process.env.WP_URL,
+    user: process.env.WP_USER,
+    password: process.env.WP_APP_PASSWORD,
+  };
+}
+
+const DEFAULT_WP_SITE = "bestprops";
+
 // ─── Async Job Store ─────────────────────────────────────────────────────────
 
 interface Job {
@@ -65,6 +101,7 @@ interface GenerateOptions {
   logo_scale?: number;
   output_format?: OutputFormat;
   upload_to_wp?: boolean;
+  wp_site?: string;
   wp_filename?: string;
 }
 
@@ -117,18 +154,18 @@ async function runGeneration(opts: GenerateOptions): Promise<{
   // Upload to WordPress if requested
   let wpResult: { id: number; url: string } | undefined;
   if (opts.upload_to_wp) {
-    const wpUrl = process.env.WP_URL;
-    const wpUser = process.env.WP_USER;
-    const wpPass = process.env.WP_APP_PASSWORD;
-    if (!wpUrl || !wpUser || !wpPass) {
-      throw new Error("WordPress upload requires WP_URL, WP_USER, and WP_APP_PASSWORD environment variables.");
+    const siteName = opts.wp_site || DEFAULT_WP_SITE;
+    const siteConfig = WP_SITES[siteName];
+    if (!siteConfig) {
+      const available = Object.keys(WP_SITES).join(", ") || "none";
+      throw new Error(`WordPress site '${siteName}' not configured. Available sites: ${available}. Set WP_${siteName.toUpperCase()}_URL, WP_${siteName.toUpperCase()}_USER, WP_${siteName.toUpperCase()}_PASSWORD env vars.`);
     }
     let filename = opts.wp_filename || `ai-generated-${Date.now()}${fmtConfig.ext}`;
     // Ensure filename has the correct extension
     if (!filename.endsWith(fmtConfig.ext)) {
       filename = filename.replace(/\.[^.]+$/, fmtConfig.ext);
     }
-    wpResult = await uploadToWordPress(imageBuffer, filename, wpUrl, wpUser, wpPass, fmtConfig.mimeType);
+    wpResult = await uploadToWordPress(imageBuffer, filename, siteConfig.url, siteConfig.user, siteConfig.password, fmtConfig.mimeType);
   }
 
   return {
@@ -439,7 +476,7 @@ function registerTools(server: McpServer) {
 
 // ─── Operating README ────────────────────────────────────────────────────────
 
-const OPERATING_README_VERSION = "2026-03-22-v3";
+const OPERATING_README_VERSION = "2026-03-22-v4";
 
 const OPERATING_README = `
 # Image Gen MCP Server — Operating README
@@ -486,10 +523,17 @@ Pass the key as the \`logo\` parameter (e.g., \`logo: "tradeify"\`). You can als
 
 ---
 
-## WordPress Upload
-Set \`upload_to_wp: true\` on any generation tool to upload the final image directly to the BestProps WordPress media library. Optionally set \`wp_filename\` for a descriptive filename (e.g., "mobile-dom-alerts-header.png"). The response will include the WordPress URL and media ID.
+## WordPress Upload (Multi-Site)
+Set \`upload_to_wp: true\` on any generation tool to upload the final image directly to a WordPress media library. Use \`wp_site\` to target a specific site (defaults to "bestprops").
 
-WordPress is configured for BestProps.com (https://bestprops.com). For Tradeify (Webflow) and Tradeify Crypto (Webflow), images need to be uploaded separately via the Webflow MCP or manually.
+Available sites are configured via environment variables with the pattern WP_<SITE>_URL, WP_<SITE>_USER, WP_<SITE>_PASSWORD. Use \`imagegen_list_wp_sites\` to see which sites are configured.
+
+Examples:
+- \`wp_site: "bestprops"\` → uploads to bestprops.com (default)
+- \`wp_site: "kixie"\` → uploads to kixie.com
+- \`wp_site: "kixie_staging"\` → uploads to kixiestaging.wpengine.com
+
+For Tradeify (Webflow) and Tradeify Crypto (Webflow), images need to be uploaded separately via the Webflow MCP or manually.
 
 ---
 
@@ -580,10 +624,11 @@ server.tool(
     logo_position: z.enum(["top-left", "top-right", "bottom-left", "bottom-right", "center"]).default("top-left").describe("Where to place the logo on the image."),
     logo_scale: z.number().min(0.05).max(0.5).default(0.15).describe("Logo size as fraction of image width (0.15 = 15% of image width)."),
     upload_to_wp: z.boolean().default(false).describe("Upload the final image to WordPress and return the media URL."),
+    wp_site: z.string().optional().describe("WordPress site key to upload to (e.g. 'bestprops', 'kixie', 'kixie_staging'). Defaults to 'bestprops'. Use imagegen_list_wp_sites to see available sites."),
     wp_filename: z.string().optional().describe("Filename for WordPress upload (e.g. 'mobile-dom-alerts-header.avif')."),
     output_format: z.enum(["png", "avif", "webp"]).default("avif").describe("Output image format. AVIF is smallest (50-80% smaller than PNG), WebP is widely supported, PNG is lossless. Default: avif."),
   },
-  async ({ prompt, model, size, quality, logo, logo_position, logo_scale, upload_to_wp, wp_filename, output_format }) => {
+  async ({ prompt, model, size, quality, logo, logo_position, logo_scale, upload_to_wp, wp_site, wp_filename, output_format }) => {
     try {
       // Generate the image
       const result = await generateImageOpenAI(prompt, model, size, quality);
@@ -613,18 +658,18 @@ server.tool(
       // Upload to WordPress if requested
       let wpResult: { id: number; url: string } | null = null;
       if (upload_to_wp) {
-        const wpUrl = process.env.WP_URL;
-        const wpUser = process.env.WP_USER;
-        const wpPass = process.env.WP_APP_PASSWORD;
-        if (!wpUrl || !wpUser || !wpPass) {
+        const siteName = wp_site || DEFAULT_WP_SITE;
+        const siteConfig = WP_SITES[siteName];
+        if (!siteConfig) {
+          const available = Object.keys(WP_SITES).join(", ") || "none";
           return {
             isError: true,
-            content: [{ type: "text", text: "WordPress upload requires WP_URL, WP_USER, and WP_APP_PASSWORD environment variables." }],
+            content: [{ type: "text", text: `WordPress site '${siteName}' not configured. Available: ${available}` }],
           };
         }
         const filename = wp_filename || `ai-generated-${Date.now()}.png`;
         let finalFilename = filename.endsWith(fmtConfig.ext) ? filename : filename.replace(/\.[^.]+$/, fmtConfig.ext);
-        wpResult = await uploadToWordPress(imageBuffer, finalFilename, wpUrl, wpUser, wpPass, fmtConfig.mimeType);
+        wpResult = await uploadToWordPress(imageBuffer, finalFilename, siteConfig.url, siteConfig.user, siteConfig.password, fmtConfig.mimeType);
       }
 
       const textParts: string[] = [
@@ -671,10 +716,11 @@ server.tool(
     logo_position: z.enum(["top-left", "top-right", "bottom-left", "bottom-right", "center"]).default("top-left").describe("Where to place the logo on the image."),
     logo_scale: z.number().min(0.05).max(0.5).default(0.15).describe("Logo size as fraction of image width."),
     upload_to_wp: z.boolean().default(false).describe("Upload the final image to WordPress and return the media URL."),
+    wp_site: z.string().optional().describe("WordPress site key to upload to (e.g. 'bestprops', 'kixie', 'kixie_staging'). Defaults to 'bestprops'. Use imagegen_list_wp_sites to see available sites."),
     wp_filename: z.string().optional().describe("Filename for WordPress upload."),
     output_format: z.enum(["png", "avif", "webp"]).default("avif").describe("Output image format. AVIF is smallest, WebP is widely supported, PNG is lossless. Default: avif."),
   },
-  async ({ prompt, aspect_ratio, logo, logo_position, logo_scale, upload_to_wp, wp_filename, output_format }) => {
+  async ({ prompt, aspect_ratio, logo, logo_position, logo_scale, upload_to_wp, wp_site, wp_filename, output_format }) => {
     try {
       const result = await generateImageGemini(prompt, aspect_ratio);
       let imageBuffer: any = Buffer.from(result.base64, "base64");
@@ -703,20 +749,20 @@ server.tool(
       // Upload to WordPress if requested
       let wpResult: { id: number; url: string } | null = null;
       if (upload_to_wp) {
-        const wpUrl = process.env.WP_URL;
-        const wpUser = process.env.WP_USER;
-        const wpPass = process.env.WP_APP_PASSWORD;
-        if (!wpUrl || !wpUser || !wpPass) {
+        const siteName = wp_site || DEFAULT_WP_SITE;
+        const siteConfig = WP_SITES[siteName];
+        if (!siteConfig) {
+          const available = Object.keys(WP_SITES).join(", ") || "none";
           return {
             isError: true,
-            content: [{ type: "text", text: "WordPress upload requires WP_URL, WP_USER, and WP_APP_PASSWORD environment variables." }],
+            content: [{ type: "text", text: `WordPress site '${siteName}' not configured. Available: ${available}` }],
           };
         }
         let filename = wp_filename || `ai-generated-${Date.now()}${fmtConfig.ext}`;
         if (!filename.endsWith(fmtConfig.ext)) {
           filename = filename.replace(/\.[^.]+$/, fmtConfig.ext);
         }
-        wpResult = await uploadToWordPress(imageBuffer, filename, wpUrl, wpUser, wpPass, fmtConfig.mimeType);
+        wpResult = await uploadToWordPress(imageBuffer, filename, siteConfig.url, siteConfig.user, siteConfig.password, fmtConfig.mimeType);
       }
 
       const textParts: string[] = [
@@ -761,9 +807,10 @@ server.tool(
     position: z.enum(["top-left", "top-right", "bottom-left", "bottom-right", "center"]).default("top-left"),
     logo_scale: z.number().min(0.05).max(0.5).default(0.15),
     upload_to_wp: z.boolean().default(false),
+    wp_site: z.string().optional().describe("WordPress site key (e.g. 'bestprops', 'kixie'). Defaults to 'bestprops'."),
     wp_filename: z.string().optional(),
   },
-  async ({ image_url, logo, position, logo_scale, upload_to_wp, wp_filename }) => {
+  async ({ image_url, logo, position, logo_scale, upload_to_wp, wp_site, wp_filename }) => {
     try {
       const imageBuffer = await fetchImageAsBuffer(image_url);
 
@@ -783,17 +830,17 @@ server.tool(
 
       let wpResult: { id: number; url: string } | null = null;
       if (upload_to_wp) {
-        const wpUrl = process.env.WP_URL;
-        const wpUser = process.env.WP_USER;
-        const wpPass = process.env.WP_APP_PASSWORD;
-        if (!wpUrl || !wpUser || !wpPass) {
+        const siteName = wp_site || DEFAULT_WP_SITE;
+        const siteConfig = WP_SITES[siteName];
+        if (!siteConfig) {
+          const available = Object.keys(WP_SITES).join(", ") || "none";
           return {
             isError: true,
-            content: [{ type: "text", text: "WordPress upload requires WP_URL, WP_USER, and WP_APP_PASSWORD environment variables." }],
+            content: [{ type: "text", text: `WordPress site '${siteName}' not configured. Available: ${available}` }],
           };
         }
         const filename = wp_filename || `logo-composite-${Date.now()}.png`;
-        wpResult = await uploadToWordPress(result, filename, wpUrl, wpUser, wpPass);
+        wpResult = await uploadToWordPress(result, filename, siteConfig.url, siteConfig.user, siteConfig.password);
       }
 
       const textParts = [`Logo composited at ${position} (scale: ${logo_scale}).`];
@@ -842,10 +889,34 @@ server.tool(
     const status: string[] = [];
     status.push(`OpenAI: ${OPENAI_API_KEY ? "✅ Configured" : "❌ Not configured (set OPENAI_API_KEY)"}`);
     status.push(`Gemini: ${GEMINI_API_KEY ? "✅ Configured" : "❌ Not configured (set GEMINI_API_KEY)"}`);
-    status.push(`WordPress: ${process.env.WP_URL ? "✅ Configured" : "❌ Not configured (set WP_URL, WP_USER, WP_APP_PASSWORD)"}`);
+    const wpSiteNames = Object.keys(WP_SITES);
+    status.push(`WordPress sites: ${wpSiteNames.length > 0 ? wpSiteNames.join(", ") : "None configured"}`);
+    status.push(`Default WP site: ${DEFAULT_WP_SITE}`);
     status.push(`Logos: ${Object.keys(LOGO_URLS).length > 0 ? Object.keys(LOGO_URLS).join(", ") : "None configured"}`);
     return {
       content: [{ type: "text", text: status.join("\n") }],
+    };
+  }
+);
+
+// Tool: List configured WordPress sites
+server.tool(
+  "imagegen_list_wp_sites",
+  "List all configured WordPress sites available for image upload. Sites are set via WP_<SITE>_URL, WP_<SITE>_USER, WP_<SITE>_PASSWORD environment variables.",
+  {},
+  async () => {
+    const sites = Object.entries(WP_SITES);
+    if (sites.length === 0) {
+      return {
+        content: [{ type: "text", text: "No WordPress sites configured. Set WP_<SITE>_URL, WP_<SITE>_USER, WP_<SITE>_PASSWORD env vars." }],
+      };
+    }
+    const list = sites.map(([key, config]) => {
+      const isDefault = key === DEFAULT_WP_SITE ? " (default)" : "";
+      return `- **${key}**${isDefault}: ${config.url}`;
+    }).join("\n");
+    return {
+      content: [{ type: "text", text: `Available WordPress sites:\n${list}\n\nUse wp_site parameter to target a specific site (e.g. wp_site: "kixie").` }],
     };
   }
 );
@@ -865,10 +936,11 @@ server.tool(
     logo_position: z.enum(["top-left", "top-right", "bottom-left", "bottom-right", "center"]).default("top-left").optional(),
     logo_scale: z.number().min(0.05).max(0.5).default(0.15).optional(),
     upload_to_wp: z.boolean().default(false).optional().describe("Upload to WordPress when complete."),
+    wp_site: z.string().optional().describe("WordPress site key (e.g. 'bestprops', 'kixie'). Defaults to 'bestprops'."),
     wp_filename: z.string().optional().describe("Filename for WordPress upload."),
     output_format: z.enum(["png", "avif", "webp"]).default("avif").optional().describe("Output image format. Default: avif."),
   },
-  async ({ provider, prompt, model, size, quality, aspect_ratio, logo, logo_position, logo_scale, upload_to_wp, wp_filename, output_format }) => {
+  async ({ provider, prompt, model, size, quality, aspect_ratio, logo, logo_position, logo_scale, upload_to_wp, wp_site, wp_filename, output_format }) => {
     const jobId = generateJobId();
     const job: Job = {
       id: jobId,
@@ -892,6 +964,7 @@ server.tool(
       logo_scale: logo_scale || undefined,
       output_format: (output_format as OutputFormat) || undefined,
       upload_to_wp: upload_to_wp || false,
+      wp_site: wp_site || undefined,
       wp_filename: wp_filename || undefined,
     }).then((result) => {
       job.status = "complete";
@@ -1009,8 +1082,11 @@ app.get("/health", (_req, res) => {
     providers: {
       openai: !!OPENAI_API_KEY,
       gemini: !!GEMINI_API_KEY,
-      wordpress: !!process.env.WP_URL,
     },
+    wordpress_sites: Object.fromEntries(
+      Object.entries(WP_SITES).map(([name, config]) => [name, config.url])
+    ),
+    default_wp_site: DEFAULT_WP_SITE,
     logos: Object.keys(LOGO_URLS),
   });
 });
