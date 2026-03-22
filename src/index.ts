@@ -632,9 +632,12 @@ server.tool(
         textParts.push(`Uploaded to WordPress: ${wpResult.url} (media ID: ${wpResult.id})`);
       }
 
+      const finalTextOpenai = sanitizeToolText(textParts.join("\n"));
+      console.error(`[DEBUG] imagegen_openai final tool result text: "${finalTextOpenai}"`);
+
       return {
         content: [
-          { type: "text", text: sanitizeToolText(textParts.join("\n")) },
+          { type: "text", text: finalTextOpenai },
           { type: "image", data: base64Final, mimeType: fmtConfig.mimeType },
         ],
       };
@@ -718,9 +721,12 @@ server.tool(
         textParts.push(`Uploaded to WordPress: ${wpResult.url} (media ID: ${wpResult.id})`);
       }
 
+      const finalTextGemini = sanitizeToolText(textParts.join("\n"));
+      console.error(`[DEBUG] imagegen_gemini final tool result text: "${finalTextGemini}"`);
+
       return {
         content: [
-          { type: "text", text: sanitizeToolText(textParts.join("\n")) },
+          { type: "text", text: finalTextGemini },
           { type: "image", data: base64Final, mimeType: fmtConfig.mimeType },
         ],
       };
