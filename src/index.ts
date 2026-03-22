@@ -159,6 +159,15 @@ async function convertImageFormat(
   return sharp(buffer).png().toBuffer();
 }
 
+// Strip WordPress PHP warnings that leak into responses
+function sanitizeToolText(text: string): string {
+  // Remove the AVIF format warning WordPress sometimes emits
+  return text
+    .replace(/Image format ['']image\/avif[''] is not currently supported\.\s*Supported formats are:[^.]*\./gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 async function fetchImageAsBuffer(url: string): Promise<Buffer> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch image from ${url}: ${res.status}`);
@@ -577,7 +586,7 @@ server.tool(
 
       return {
         content: [
-          { type: "text", text: textParts.join("\n") },
+          { type: "text", text: sanitizeToolText(textParts.join("\n")) },
           { type: "image", data: base64Final, mimeType: fmtConfig.mimeType },
         ],
       };
@@ -663,7 +672,7 @@ server.tool(
 
       return {
         content: [
-          { type: "text", text: textParts.join("\n") },
+          { type: "text", text: sanitizeToolText(textParts.join("\n")) },
           { type: "image", data: base64Final, mimeType: fmtConfig.mimeType },
         ],
       };
@@ -726,7 +735,7 @@ server.tool(
 
       return {
         content: [
-          { type: "text", text: textParts.join("\n") },
+          { type: "text", text: sanitizeToolText(textParts.join("\n")) },
           { type: "image", data: result.toString("base64"), mimeType: "image/png" },
         ],
       };
@@ -880,7 +889,7 @@ server.tool(
     }
 
     const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [
-      { type: "text", text: textParts.join("\n") },
+      { type: "text", text: sanitizeToolText(textParts.join("\n")) },
     ];
 
     if (job.base64) {
