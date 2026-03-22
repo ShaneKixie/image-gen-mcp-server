@@ -642,19 +642,14 @@ server.tool(
 
       const finalTextOpenai = sanitizeToolText(textParts.join("\n"));
 
-      // Only include base64 image data if NOT uploaded to WP
-      if (wpResult) {
+      if (!wpResult) {
         return {
-          content: [{ type: "text", text: finalTextOpenai }],
+          content: [{ type: "text", text: finalTextOpenai + "\n\nNote: Image was generated but not uploaded. Use upload_to_wp=true to upload to WordPress and get a viewable URL." }],
         };
       }
 
-      const base64Final = imageBuffer.toString("base64");
       return {
-        content: [
-          { type: "text", text: finalTextOpenai },
-          { type: "image", data: base64Final, mimeType: "image/png" },
-        ],
+        content: [{ type: "text", text: finalTextOpenai }],
       };
     } catch (error) {
       return {
@@ -736,19 +731,16 @@ server.tool(
 
       const finalTextGemini = sanitizeToolText(textParts.join("\n"));
 
-      // Only include base64 image data if NOT uploaded to WP (avoids response size issues)
-      if (wpResult) {
+      // Never return base64 image data - it crashes Claude's response handler.
+      // Users should always use upload_to_wp=true and view images at the WordPress URL.
+      if (!wpResult) {
         return {
-          content: [{ type: "text", text: finalTextGemini }],
+          content: [{ type: "text", text: finalTextGemini + "\n\nNote: Image was generated but not uploaded. Use upload_to_wp=true to upload to WordPress and get a viewable URL." }],
         };
       }
 
-      const base64Final = imageBuffer.toString("base64");
       return {
-        content: [
-          { type: "text", text: finalTextGemini },
-          { type: "image", data: base64Final, mimeType: "image/png" },
-        ],
+        content: [{ type: "text", text: finalTextGemini }],
       };
     } catch (error) {
       return {
@@ -806,11 +798,11 @@ server.tool(
 
       const textParts = [`Logo composited at ${position} (scale: ${logo_scale}).`];
       if (wpResult) textParts.push(`Uploaded to WordPress: ${wpResult.url} (media ID: ${wpResult.id})`);
+      if (!wpResult) textParts.push(`Note: Image was composited but not uploaded. Use upload_to_wp=true to get a viewable URL.`);
 
       return {
         content: [
           { type: "text", text: sanitizeToolText(textParts.join("\n")) },
-          { type: "image", data: result.toString("base64"), mimeType: "image/png" },
         ],
       };
     } catch (error) {
@@ -962,17 +954,12 @@ server.tool(
       textParts.push(`Uploaded to WordPress: ${job.wpResult.url} (media ID: ${job.wpResult.id})`);
     }
 
-    const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [
+    const content: Array<{ type: string; text?: string }> = [
       { type: "text", text: sanitizeToolText(textParts.join("\n")) },
     ];
 
-    if (job.base64) {
-      content.push({
-        type: "image",
-        data: job.base64,
-        mimeType: "image/png",
-      });
-    }
+    // Never return base64 image data - it crashes Claude's response handler.
+    // The WordPress URL in textParts is sufficient for viewing the image.
 
     // Clean up after retrieval
     jobs.delete(job_id);
