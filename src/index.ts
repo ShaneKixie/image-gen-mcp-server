@@ -355,10 +355,8 @@ async function uploadToWordPress(
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
 
-const server = new McpServer({
-  name: "image-gen-mcp-server",
-  version: "1.0.0",
-});
+// Tool registration function — called once per request in stateless mode
+function registerTools(server: McpServer) {
 
 // ─── Operating README ────────────────────────────────────────────────────────
 
@@ -887,21 +885,36 @@ server.tool(
 );
 
 // ─── Express Server with Streamable HTTP Transport ───────────────────────────
+} // end registerTools
 
 const app = express();
 app.use(express.json());
+
+// Factory function to create a new MCP server with all tools registered
+function createMcpServer(): McpServer {
+  const srv = new McpServer({
+    name: "image-gen-mcp-server",
+    version: "1.0.0",
+  });
+
+  // Re-register all tools on the new server instance
+  registerTools(srv);
+  return srv;
+}
 
 app.all("/mcp", async (req, res) => {
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless
   });
 
+  const srv = createMcpServer();
+
   res.on("close", () => {
     transport.close();
-    server.close();
+    srv.close();
   });
 
-  await server.connect(transport);
+  await srv.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });
 
