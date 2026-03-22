@@ -20,7 +20,114 @@ for (const [key, value] of Object.entries(process.env)) {
   }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Async Job Store ─────────────────────────────────────────────────────────
+
+interface Job {
+  id: string;
+  status: "pending" | "complete" | "error";
+  createdAt: number;
+  provider: string;
+  prompt: string;
+  base64?: string;
+  mimeType?: string;
+  wpResult?: { id: number; url: string };
+  error?: string;
+}
+
+const jobs = new Map<string, Job>();
+
+// Clean up old jobs every 10 minutes (keep for 1 hour)
+setInterval(() => {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const [id, job] of jobs) {
+    if (job.createdAt < cutoff) jobs.delete(id);
+  }
+}, 10 * 60 * 1000);
+
+function generateJobId(): string {
+  return `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// ─── Shared generation logic ─────────────────────────────────────────────────
+
+interface GenerateOptions {
+  provider: "openai" | "gemini";
+  prompt: string;
+  // OpenAI options
+  model?: string;
+  size?: string;
+  quality?: string;
+  // Gemini options
+  aspect_ratio?: string;
+  // Shared options
+  logo?: string;
+  logo_position?: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
+  logo_scale?: number;
+  upload_to_wp?: boolean;
+  wp_filename?: string;
+}
+
+async function runGeneration(opts: GenerateOptions): Promise<{
+  base64: string;
+  mimeType: string;
+  wpResult?: { id: number; url: string };
+}> {
+  let imageBuffer: any;
+  let mimeType = "image/png";
+
+  if (opts.provider === "openai") {
+    const result = await generateImageOpenAI(
+      opts.prompt,
+      opts.model || "gpt-image-1",
+      opts.size || "1536x1024",
+      opts.quality || "high"
+    );
+    imageBuffer = Buffer.from(result.base64, "base64");
+  } else {
+    const result = await generateImageGemini(opts.prompt, opts.aspect_ratio || "16:9");
+    imageBuffer = Buffer.from(result.base64, "base64");
+    mimeType = result.mimeType || "image/png";
+  }
+
+  // Composite logo if requested
+  if (opts.logo) {
+    let logoBuffer: Buffer;
+    if (LOGO_URLS[opts.logo.toLowerCase()]) {
+      logoBuffer = await fetchImageAsBuffer(LOGO_URLS[opts.logo.toLowerCase()]);
+    } else if (opts.logo.startsWith("http")) {
+      logoBuffer = await fetchImageAsBuffer(opts.logo);
+    } else {
+      throw new Error(`Logo '${opts.logo}' not found. Available: ${Object.keys(LOGO_URLS).join(", ") || "none"}`);
+    }
+    imageBuffer = await compositeLogoOnImage(
+      imageBuffer, logoBuffer,
+      opts.logo_position || "top-left",
+      30,
+      opts.logo_scale || 0.15
+    );
+  }
+
+  // Upload to WordPress if requested
+  let wpResult: { id: number; url: string } | undefined;
+  if (opts.upload_to_wp) {
+    const wpUrl = process.env.WP_URL;
+    const wpUser = process.env.WP_USER;
+    const wpPass = process.env.WP_APP_PASSWORD;
+    if (!wpUrl || !wpUser || !wpPass) {
+      throw new Error("WordPress upload requires WP_URL, WP_USER, and WP_APP_PASSWORD environment variables.");
+    }
+    const filename = opts.wp_filename || `ai-generated-${Date.now()}.png`;
+    wpResult = await uploadToWordPress(imageBuffer, filename, wpUrl, wpUser, wpPass);
+  }
+
+  return {
+    base64: imageBuffer.toString("base64"),
+    mimeType,
+    wpResult,
+  };
+}
+
+
 
 async function fetchImageAsBuffer(url: string): Promise<Buffer> {
   const res = await fetch(url);
@@ -478,6 +585,127 @@ server.tool(
     return {
       content: [{ type: "text", text: status.join("\n") }],
     };
+  }
+);
+
+// Tool: Async start - kicks off generation and returns immediately with job ID
+server.tool(
+  "imagegen_start",
+  "Start an async image generation job. Returns a job ID immediately — use imagegen_result to poll for the completed image. Use this for high-quality generation that might exceed timeout limits.",
+  {
+    provider: z.enum(["openai", "gemini"]).describe("Which AI provider to use. 'gemini' is faster and better at text in images. 'openai' (gpt-image-1) has highest quality but slower."),
+    prompt: z.string().describe("Detailed image generation prompt."),
+    model: z.enum(["gpt-image-1", "dall-e-3"]).default("gpt-image-1").optional().describe("OpenAI model (only used when provider is 'openai')."),
+    size: z.enum(["1024x1024", "1536x1024", "1024x1536", "auto"]).default("1536x1024").optional().describe("Image size (only used when provider is 'openai')."),
+    quality: z.enum(["low", "medium", "high", "auto"]).default("high").optional().describe("Image quality (only used when provider is 'openai'). High quality is safe here since there's no timeout."),
+    aspect_ratio: z.enum(["1:1", "16:9", "9:16", "4:3", "3:4"]).default("16:9").optional().describe("Aspect ratio (only used when provider is 'gemini')."),
+    logo: z.string().optional().describe("Logo key (e.g. 'tradeify') or URL to a logo PNG."),
+    logo_position: z.enum(["top-left", "top-right", "bottom-left", "bottom-right", "center"]).default("top-left").optional(),
+    logo_scale: z.number().min(0.05).max(0.5).default(0.15).optional(),
+    upload_to_wp: z.boolean().default(false).optional().describe("Upload to WordPress when complete."),
+    wp_filename: z.string().optional().describe("Filename for WordPress upload."),
+  },
+  async ({ provider, prompt, model, size, quality, aspect_ratio, logo, logo_position, logo_scale, upload_to_wp, wp_filename }) => {
+    const jobId = generateJobId();
+    const job: Job = {
+      id: jobId,
+      status: "pending",
+      createdAt: Date.now(),
+      provider,
+      prompt,
+    };
+    jobs.set(jobId, job);
+
+    // Fire and forget — run generation in background
+    runGeneration({
+      provider,
+      prompt,
+      model: model || undefined,
+      size: size || undefined,
+      quality: quality || undefined,
+      aspect_ratio: aspect_ratio || undefined,
+      logo: logo || undefined,
+      logo_position: (logo_position as any) || undefined,
+      logo_scale: logo_scale || undefined,
+      upload_to_wp: upload_to_wp || false,
+      wp_filename: wp_filename || undefined,
+    }).then((result) => {
+      job.status = "complete";
+      job.base64 = result.base64;
+      job.mimeType = result.mimeType;
+      job.wpResult = result.wpResult;
+    }).catch((err) => {
+      job.status = "error";
+      job.error = err instanceof Error ? err.message : String(err);
+    });
+
+    return {
+      content: [{
+        type: "text",
+        text: `Job started: ${jobId}\nProvider: ${provider}\nStatus: pending\n\nUse imagegen_result with this job_id to check when the image is ready. It typically takes 15-60 seconds depending on provider and quality.`,
+      }],
+    };
+  }
+);
+
+// Tool: Poll for async job result
+server.tool(
+  "imagegen_result",
+  "Check the result of an async image generation job started with imagegen_start. Returns the image if complete, or status if still pending.",
+  {
+    job_id: z.string().describe("The job ID returned by imagegen_start."),
+  },
+  async ({ job_id }) => {
+    const job = jobs.get(job_id);
+    if (!job) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Job '${job_id}' not found. It may have expired (jobs are kept for 1 hour).` }],
+      };
+    }
+
+    if (job.status === "pending") {
+      const elapsed = Math.round((Date.now() - job.createdAt) / 1000);
+      return {
+        content: [{
+          type: "text",
+          text: `Job ${job_id} is still processing (${elapsed}s elapsed).\nProvider: ${job.provider}\n\nTry again in 10-15 seconds.`,
+        }],
+      };
+    }
+
+    if (job.status === "error") {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Job ${job_id} failed: ${job.error}` }],
+      };
+    }
+
+    // Status is "complete"
+    const textParts: string[] = [
+      `Job ${job_id} complete!`,
+      `Provider: ${job.provider}`,
+    ];
+    if (job.wpResult) {
+      textParts.push(`Uploaded to WordPress: ${job.wpResult.url} (media ID: ${job.wpResult.id})`);
+    }
+
+    const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [
+      { type: "text", text: textParts.join("\n") },
+    ];
+
+    if (job.base64) {
+      content.push({
+        type: "image",
+        data: job.base64,
+        mimeType: job.mimeType || "image/png",
+      });
+    }
+
+    // Clean up after retrieval
+    jobs.delete(job_id);
+
+    return { content: content as any };
   }
 );
 
