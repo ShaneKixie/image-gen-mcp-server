@@ -329,6 +329,124 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+// ─── Operating README ────────────────────────────────────────────────────────
+
+const OPERATING_README_VERSION = "2026-03-22-v1";
+
+const OPERATING_README = `
+# Image Gen MCP Server — Operating README
+**Version: ${OPERATING_README_VERSION}**
+
+You MUST call \`acknowledge_operating_readme\` with the version string above before using any other tools in this server. This ensures you understand how to use the tools correctly each session.
+
+---
+
+## Overview
+This MCP server generates AI images via OpenAI (GPT-Image-1) and Google Gemini (2.5 Flash Image), with built-in logo compositing (Sharp) and WordPress upload support. It is owned and operated by Shane Martin for use across Tradeify, Tradeify Crypto, and BestProps.
+
+---
+
+## Tools Available
+
+### Image Generation (sync — use for quick/medium quality)
+- **imagegen_openai** — Generate via OpenAI GPT-Image-1 or DALL-E 3. Best quality but slower. Use \`quality: "medium"\` to stay under the 45s MCP timeout. Supports logo compositing and WP upload.
+- **imagegen_gemini** — Generate via Google Gemini 2.5 Flash Image. Faster than OpenAI, excellent at rendering text in images. Supports logo compositing and WP upload. Use \`aspect_ratio: "16:9"\` for blog headers.
+
+### Image Generation (async — use for high quality)
+- **imagegen_start** — Kicks off generation in the background. Returns a job ID immediately. Use this when you need \`quality: "high"\` with OpenAI, or whenever you want to avoid timeout risk. Accepts all the same params as the sync tools (provider, prompt, logo, quality, upload_to_wp, etc.).
+- **imagegen_result** — Poll for the result of an async job by job_id. Returns "pending" if still processing, the completed image if done, or an error message. Wait ~15-30 seconds between polls. Jobs expire after 1 hour.
+
+### Utility
+- **imagegen_composite_logo** — Add a logo to any existing image URL. Useful for branding images from other sources.
+- **imagegen_list_logos** — List all pre-configured logo keys and their URLs.
+- **imagegen_status** — Check which providers (OpenAI, Gemini, WordPress) are configured and available.
+
+---
+
+## Pre-configured Logos
+Logos are set via environment variables (LOGO_*). Current logos:
+- \`tradeify\` — Tradeify futures prop firm logo
+- \`bestprops\` — BestProps.com prop firm directory logo
+
+Pass the key as the \`logo\` parameter (e.g., \`logo: "tradeify"\`). You can also pass a full URL to any PNG image.
+
+---
+
+## Logo Compositing Options
+- \`logo_position\`: "top-left" (default), "top-right", "bottom-left", "bottom-right", "center"
+- \`logo_scale\`: 0.05 to 0.5 (default 0.15 = 15% of image width). Use 0.12 for subtle branding, 0.2 for prominent.
+
+---
+
+## WordPress Upload
+Set \`upload_to_wp: true\` on any generation tool to upload the final image directly to the BestProps WordPress media library. Optionally set \`wp_filename\` for a descriptive filename (e.g., "mobile-dom-alerts-header.png"). The response will include the WordPress URL and media ID.
+
+WordPress is configured for BestProps.com (https://bestprops.com). For Tradeify (Webflow) and Tradeify Crypto (Webflow), images need to be uploaded separately via the Webflow MCP or manually.
+
+---
+
+## Recommended Workflow
+
+### For blog headers (most common use case):
+1. Use \`imagegen_gemini\` with \`aspect_ratio: "16:9"\`, the appropriate \`logo\` key, and \`upload_to_wp: true\` if it's a BestProps article.
+2. If the user wants OpenAI high quality, use \`imagegen_start\` with \`provider: "openai"\` and \`quality: "high"\`, then poll with \`imagegen_result\`.
+3. Always include the blog title in the prompt if the user wants text in the image — Gemini handles text rendering much better than OpenAI.
+
+### For quick iterations:
+Use \`imagegen_openai\` with \`quality: "medium"\` — it stays under the 45s timeout and still looks good.
+
+### Provider comparison:
+- **Gemini**: Faster, better at text in images, $0.039/image, 16:9 aspect ratio native
+- **OpenAI GPT-Image-1**: Highest overall quality, slower, better at photorealism, needs async for high quality
+
+---
+
+## Important Notes
+- The 45-second MCP timeout is a Claude.ai platform limit. It cannot be changed. Use \`imagegen_start\`/\`imagegen_result\` for anything that might exceed it.
+- Logo images should ideally have transparent backgrounds for clean compositing.
+- The base64 image returned by the tools may not render inline in Claude.ai chat. Always use \`upload_to_wp: true\` or tell the user to check the WordPress media library for the final result.
+- When generating blog headers, default to 16:9 aspect ratio (Gemini) or 1536x1024 (OpenAI).
+`.trim();
+
+let readmeAcknowledged = false;
+
+server.tool(
+  "get_operating_readme",
+  "Return the operating instructions for the Image Gen MCP server. MUST be called and acknowledged before using any other tools in this server.",
+  {},
+  async () => {
+    return {
+      content: [{ type: "text", text: OPERATING_README }],
+    };
+  }
+);
+
+server.tool(
+  "acknowledge_operating_readme",
+  "Acknowledge that you have read and understood the operating readme. Must pass the current version string from the readme.",
+  {
+    version: z.string().describe("The version string from the operating readme (e.g., '2026-03-22-v1')."),
+  },
+  async ({ version }) => {
+    if (version !== OPERATING_README_VERSION) {
+      return {
+        isError: true,
+        content: [{
+          type: "text",
+          text: `Version mismatch. Expected '${OPERATING_README_VERSION}', got '${version}'. Please call get_operating_readme again to get the latest version.`,
+        }],
+      };
+    }
+    readmeAcknowledged = true;
+    return {
+      content: [{
+        type: "text",
+        text: `Operating readme acknowledged (version ${version}). All tools are now available. Ready to generate images.`,
+      }],
+    };
+  }
+);
+
 // Tool: Generate image with OpenAI
 server.tool(
   "imagegen_openai",
