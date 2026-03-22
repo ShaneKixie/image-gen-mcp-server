@@ -344,19 +344,26 @@ async function uploadToWordPress(
     body: imageBuffer as any,
   });
 
-  // Log the raw response body before any parsing
   const rawBody = await res.text();
-  console.error(`[WP Upload] Status: ${res.status}`);
-  console.error(`[WP Upload] Content-Type sent: ${contentType}`);
-  console.error(`[WP Upload] Filename: ${filename}`);
-  console.error(`[WP Upload] Raw response body (first 2000 chars):\n${rawBody.slice(0, 2000)}`);
+  console.error(`[WP Upload] Status: ${res.status} | Content-Type: ${contentType} | File: ${filename}`);
 
   if (!res.ok) {
-    throw new Error(`WordPress upload error (${res.status}): ${rawBody}`);
+    throw new Error(`WordPress upload error (${res.status}): ${rawBody.slice(0, 500)}`);
   }
 
-  // Parse JSON from the raw body (since we already consumed the stream with .text())
-  const media = JSON.parse(rawBody) as { id: number; source_url: string };
+  // WordPress may prepend PHP warnings/notices before the JSON (e.g. AVIF format warnings).
+  // Strip anything before the first '{' to extract clean JSON.
+  const jsonStart = rawBody.indexOf("{");
+  if (jsonStart === -1) {
+    throw new Error(`WordPress returned non-JSON response: ${rawBody.slice(0, 500)}`);
+  }
+  const jsonBody = rawBody.slice(jsonStart);
+
+  if (jsonStart > 0) {
+    console.error(`[WP Upload] Stripped ${jsonStart} chars of pre-JSON content: ${rawBody.slice(0, jsonStart).trim()}`);
+  }
+
+  const media = JSON.parse(jsonBody) as { id: number; source_url: string };
   return { id: media.id, url: media.source_url };
 }
 
