@@ -9,6 +9,8 @@ import sharp from "sharp";
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const KRAKEN_API_KEY = process.env.KRAKEN_API_KEY || "";
+const KRAKEN_API_SECRET = process.env.KRAKEN_API_SECRET || "";
 
 // Pre-configured logo URLs (add your brand logos here as env vars)
 // e.g. LOGO_TRADEIFY=https://cdn.prod.website-files.com/...logo.png
@@ -67,6 +69,7 @@ interface Job {
   base64?: string;
   mimeType?: string;
   wpResult?: { id: number; url: string };
+  krakenUrl?: string;
   error?: string;
 }
 
@@ -109,6 +112,7 @@ async function runGeneration(opts: GenerateOptions): Promise<{
   base64: string;
   mimeType: string;
   wpResult?: { id: number; url: string };
+  krakenUrl?: string;
 }> {
   let imageBuffer: any;
   let mimeType = "image/png";
@@ -145,11 +149,33 @@ async function runGeneration(opts: GenerateOptions): Promise<{
     );
   }
 
-  // Convert to output format (default: avif)
+  // Convert to output format
   const fmt = opts.output_format || "avif";
   const fmtConfig = FORMAT_CONFIG[fmt];
-  imageBuffer = await convertImageFormat(imageBuffer, fmt);
-  mimeType = fmtConfig.mimeType;
+  let krakenUrl: string | undefined;
+
+  // Use Kraken.io for AVIF conversion if credentials are available
+  if (fmt === "avif" && KRAKEN_API_KEY && KRAKEN_API_SECRET) {
+    try {
+      // Ensure we have a PNG buffer to send to Kraken
+      const pngBuffer = await sharp(imageBuffer).png().toBuffer();
+      const krakenResult = await convertBufferToAvifViaKraken(pngBuffer);
+      krakenUrl = krakenResult.krakedUrl;
+      console.error(`[Kraken] AVIF conversion: ${krakenResult.originalSize} → ${krakenResult.krakedSize} bytes (saved ${krakenResult.originalSize - krakenResult.krakedSize})`);
+      
+      // Download the AVIF from Kraken for WP upload or base64 return
+      imageBuffer = await fetchImageAsBuffer(krakenUrl!);
+      mimeType = fmtConfig.mimeType;
+    } catch (krakenErr) {
+      console.error(`[Kraken] AVIF conversion failed, falling back to Sharp: ${krakenErr instanceof Error ? krakenErr.message : String(krakenErr)}`);
+      // Fallback to local Sharp conversion
+      imageBuffer = await convertImageFormat(imageBuffer, fmt);
+      mimeType = fmtConfig.mimeType;
+    }
+  } else {
+    imageBuffer = await convertImageFormat(imageBuffer, fmt);
+    mimeType = fmtConfig.mimeType;
+  }
 
   // Upload to WordPress if requested
   let wpResult: { id: number; url: string } | undefined;
@@ -172,6 +198,7 @@ async function runGeneration(opts: GenerateOptions): Promise<{
     base64: imageBuffer.toString("base64"),
     mimeType,
     wpResult,
+    krakenUrl,
   };
 }
 
@@ -203,6 +230,96 @@ function sanitizeToolText(text: string): string {
     .replace(/Image format ['']image\/avif[''] is not currently supported\.\s*Supported formats are:[^.]*\./gi, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+// ─── Kraken.io AVIF Conversion ──────────────────────────────────────────────
+
+interface KrakenConversionResult {
+  krakedUrl: string;
+  originalSize: number;
+  krakedSize: number;
+}
+
+/**
+ * Upload a PNG buffer to Kraken.io via their direct upload API, converting to AVIF.
+ * Returns a temporary hosted URL (valid for ~1 hour) of the AVIF image.
+ */
+async function convertBufferToAvifViaKraken(pngBuffer: Buffer): Promise<KrakenConversionResult> {
+  if (!KRAKEN_API_KEY || !KRAKEN_API_SECRET) {
+    throw new Error("Kraken.io API credentials not configured (KRAKEN_API_KEY, KRAKEN_API_SECRET)");
+  }
+
+  // Kraken's upload API uses multipart/form-data with a "data" JSON field and a "file" field
+  const boundary = `----KrakenBoundary${Date.now()}`;
+  const jsonPayload = JSON.stringify({
+    auth: {
+      api_key: KRAKEN_API_KEY,
+      api_secret: KRAKEN_API_SECRET,
+    },
+    wait: true,
+    lossy: true,
+    convert: {
+      format: "avif",
+    },
+  });
+
+  // Build multipart body manually
+  const parts: Buffer[] = [];
+
+  // JSON data part
+  parts.push(Buffer.from(
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="data"\r\n` +
+    `Content-Type: application/json\r\n\r\n` +
+    `${jsonPayload}\r\n`
+  ));
+
+  // File part
+  parts.push(Buffer.from(
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="file"; filename="image.png"\r\n` +
+    `Content-Type: image/png\r\n\r\n`
+  ));
+  parts.push(pngBuffer);
+  parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+
+  const body = Buffer.concat(parts);
+
+  const res = await fetch("https://api.kraken.io/v1/upload", {
+    method: "POST",
+    headers: {
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      "Content-Length": String(body.length),
+    },
+    body: body,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Kraken.io API error (${res.status}): ${errText}`);
+  }
+
+  const data = await res.json() as {
+    success: boolean;
+    message?: string;
+    kraked_url?: string;
+    original_size?: number;
+    kraked_size?: number;
+  };
+
+  if (!data.success) {
+    throw new Error(`Kraken.io conversion failed: ${data.message || "Unknown error"}`);
+  }
+
+  if (!data.kraked_url) {
+    throw new Error("Kraken.io returned success but no kraked_url");
+  }
+
+  return {
+    krakedUrl: data.kraked_url,
+    originalSize: data.original_size || 0,
+    krakedSize: data.kraked_size || 0,
+  };
 }
 
 async function fetchImageAsBuffer(url: string): Promise<Buffer> {
@@ -476,7 +593,7 @@ function registerTools(server: McpServer) {
 
 // ─── Operating README ────────────────────────────────────────────────────────
 
-const OPERATING_README_VERSION = "2026-03-22-v4";
+const OPERATING_README_VERSION = "2026-03-27-v5";
 
 const OPERATING_README = `
 # Image Gen MCP Server — Operating README
@@ -567,9 +684,16 @@ All generation tools support an \`output_format\` parameter: "avif" (default), "
 - **WebP**: Widely supported, ~30-50% smaller than PNG. Good fallback if AVIF causes issues.
 - **PNG**: Lossless, largest file size. Use only when lossless quality is required.
 
-The format conversion happens via Sharp after logo compositing. WordPress filenames and Content-Type headers are automatically updated to match the output format.
+### Kraken.io AVIF Conversion
+When AVIF is the output format and Kraken.io credentials are configured (KRAKEN_API_KEY, KRAKEN_API_SECRET), the server uses Kraken's API for AVIF conversion instead of the local Sharp library. This produces a **Kraken-hosted AVIF URL** (valid for ~1 hour) that can be passed directly to Webflow CMS image fields or any platform that accepts external image URLs.
 
-**CRITICAL — DO NOT ADD FORMAT WARNINGS**: AVIF is the intentional default output format. WordPress and all target platforms fully support AVIF. Do NOT add any warnings, caveats, or notes about AVIF format support, browser compatibility, or "image format not supported" in your responses. The AVIF output is correct and intentional. If the tool returns an AVIF image and a WordPress URL, simply report the URL and confirm success — do not editorialize about the format.
+The Kraken URL is returned in the tool output as "Kraken AVIF URL (temp, 1hr)". Use this URL to:
+- Push images into Webflow CMS via the Webflow MCP (e.g., setting banner-image or section image fields)
+- Upload to any platform that accepts image URLs
+
+If Kraken credentials are not set or the API call fails, the server automatically falls back to local Sharp AVIF conversion.
+
+**CRITICAL — DO NOT ADD FORMAT WARNINGS**: AVIF is the intentional default output format. WordPress, Webflow, and all target platforms fully support AVIF. Do NOT add any warnings, caveats, or notes about AVIF format support, browser compatibility, or "image format not supported" in your responses. The AVIF output is correct and intentional. If the tool returns an AVIF image and a URL, simply report the URL and confirm success — do not editorialize about the format.
 `.trim();
 
 let readmeAcknowledged = false;
@@ -653,7 +777,21 @@ server.tool(
       // Convert to output format
       const fmt = output_format || "avif";
       const fmtConfig = FORMAT_CONFIG[fmt];
-      imageBuffer = await convertImageFormat(imageBuffer, fmt);
+      let krakenUrl: string | undefined;
+
+      if (fmt === "avif" && KRAKEN_API_KEY && KRAKEN_API_SECRET) {
+        try {
+          const pngBuffer = await sharp(imageBuffer).png().toBuffer();
+          const krakenResult = await convertBufferToAvifViaKraken(pngBuffer);
+          krakenUrl = krakenResult.krakedUrl;
+          imageBuffer = await fetchImageAsBuffer(krakenUrl!);
+        } catch (krakenErr) {
+          console.error(`[Kraken] Fallback to Sharp: ${krakenErr instanceof Error ? krakenErr.message : String(krakenErr)}`);
+          imageBuffer = await convertImageFormat(imageBuffer, fmt);
+        }
+      } else {
+        imageBuffer = await convertImageFormat(imageBuffer, fmt);
+      }
 
       // Upload to WordPress if requested
       let wpResult: { id: number; url: string } | null = null;
@@ -681,6 +819,9 @@ server.tool(
       if (logo) {
         textParts.push(`Logo composited at ${logo_position} (scale: ${logo_scale}).`);
       }
+      if (krakenUrl) {
+        textParts.push(`Kraken AVIF URL (temp, 1hr): ${krakenUrl}`);
+      }
       if (wpResult) {
         textParts.push(`Uploaded to WordPress: ${wpResult.url} (media ID: ${wpResult.id})`);
       }
@@ -688,8 +829,11 @@ server.tool(
       const finalTextOpenai = sanitizeToolText(textParts.join("\n"));
 
       if (!wpResult) {
+        const noUploadMsg = krakenUrl
+          ? "\n\nImage converted to AVIF via Kraken.io. Use the Kraken URL above to upload to Webflow or other platforms (URL expires in 1 hour)."
+          : "\n\nNote: Image was generated but not uploaded. Use upload_to_wp=true to upload to WordPress and get a viewable URL.";
         return {
-          content: [{ type: "text", text: finalTextOpenai + "\n\nNote: Image was generated but not uploaded. Use upload_to_wp=true to upload to WordPress and get a viewable URL." }],
+          content: [{ type: "text", text: finalTextOpenai + noUploadMsg }],
         };
       }
 
@@ -744,7 +888,21 @@ server.tool(
       // Convert to output format
       const fmt = output_format || "avif";
       const fmtConfig = FORMAT_CONFIG[fmt];
-      imageBuffer = await convertImageFormat(imageBuffer, fmt);
+      let krakenUrl: string | undefined;
+
+      if (fmt === "avif" && KRAKEN_API_KEY && KRAKEN_API_SECRET) {
+        try {
+          const pngBuffer = await sharp(imageBuffer).png().toBuffer();
+          const krakenResult = await convertBufferToAvifViaKraken(pngBuffer);
+          krakenUrl = krakenResult.krakedUrl;
+          imageBuffer = await fetchImageAsBuffer(krakenUrl!);
+        } catch (krakenErr) {
+          console.error(`[Kraken] Fallback to Sharp: ${krakenErr instanceof Error ? krakenErr.message : String(krakenErr)}`);
+          imageBuffer = await convertImageFormat(imageBuffer, fmt);
+        }
+      } else {
+        imageBuffer = await convertImageFormat(imageBuffer, fmt);
+      }
 
       // Upload to WordPress if requested
       let wpResult: { id: number; url: string } | null = null;
@@ -771,6 +929,9 @@ server.tool(
       if (logo) {
         textParts.push(`Logo composited at ${logo_position} (scale: ${logo_scale}).`);
       }
+      if (krakenUrl) {
+        textParts.push(`Kraken AVIF URL (temp, 1hr): ${krakenUrl}`);
+      }
       if (wpResult) {
         textParts.push(`Uploaded to WordPress: ${wpResult.url} (media ID: ${wpResult.id})`);
       }
@@ -780,8 +941,11 @@ server.tool(
       // Never return base64 image data - it crashes Claude's response handler.
       // Users should always use upload_to_wp=true and view images at the WordPress URL.
       if (!wpResult) {
+        const noUploadMsg = krakenUrl
+          ? "\n\nImage converted to AVIF via Kraken.io. Use the Kraken URL above to upload to Webflow or other platforms (URL expires in 1 hour)."
+          : "\n\nNote: Image was generated but not uploaded. Use upload_to_wp=true to upload to WordPress and get a viewable URL.";
         return {
-          content: [{ type: "text", text: finalTextGemini + "\n\nNote: Image was generated but not uploaded. Use upload_to_wp=true to upload to WordPress and get a viewable URL." }],
+          content: [{ type: "text", text: finalTextGemini + noUploadMsg }],
         };
       }
 
@@ -889,6 +1053,7 @@ server.tool(
     const status: string[] = [];
     status.push(`OpenAI: ${OPENAI_API_KEY ? "✅ Configured" : "❌ Not configured (set OPENAI_API_KEY)"}`);
     status.push(`Gemini: ${GEMINI_API_KEY ? "✅ Configured" : "❌ Not configured (set GEMINI_API_KEY)"}`);
+    status.push(`Kraken.io: ${KRAKEN_API_KEY && KRAKEN_API_SECRET ? "✅ Configured (AVIF conversion)" : "❌ Not configured — using Sharp fallback (set KRAKEN_API_KEY, KRAKEN_API_SECRET)"}`);
     const wpSiteNames = Object.keys(WP_SITES);
     status.push(`WordPress sites: ${wpSiteNames.length > 0 ? wpSiteNames.join(", ") : "None configured"}`);
     status.push(`Default WP site: ${DEFAULT_WP_SITE}`);
@@ -971,6 +1136,7 @@ server.tool(
       job.base64 = result.base64;
       job.mimeType = result.mimeType;
       job.wpResult = result.wpResult;
+      job.krakenUrl = result.krakenUrl;
     }).catch((err) => {
       job.status = "error";
       job.error = err instanceof Error ? err.message : String(err);
@@ -1023,6 +1189,9 @@ server.tool(
       `Job ${job_id} complete!`,
       `Provider: ${job.provider}`,
     ];
+    if (job.krakenUrl) {
+      textParts.push(`Kraken AVIF URL (temp, 1hr): ${job.krakenUrl}`);
+    }
     if (job.wpResult) {
       textParts.push(`Uploaded to WordPress: ${job.wpResult.url} (media ID: ${job.wpResult.id})`);
     }
